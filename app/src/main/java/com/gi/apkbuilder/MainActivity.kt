@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,6 +26,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -87,8 +89,12 @@ private fun GIApp(context: Context) {
     var repo by remember { mutableStateOf(store.get("repo")) }
     var branch by remember { mutableStateOf(store.get("branch", "main")) }
     var token by remember { mutableStateOf(store.get("token")) }
-    var page by remember { mutableStateOf("Home") }
+    var page by remember { mutableStateOf("Splash") }
     var drawerOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(2400); if (page == "Splash") page = "Home" }
+    BackHandler(enabled = drawerOpen || page != "Home") {
+        if (drawerOpen) drawerOpen = false else page = "Home"
+    }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("READY") }
     var message by remember { mutableStateOf("Configure GitHub connection to start a cloud build.") }
@@ -194,15 +200,18 @@ private fun GIApp(context: Context) {
     }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = CYAN, secondary = GOLD, background = BG, surface = PANEL, onBackground = Color.White, onSurface = Color.White, error = RED)) {
+        val drawerState = rememberDrawerState(DrawerValue.Closed)
+        LaunchedEffect(drawerOpen) { if (drawerOpen) drawerState.open() else drawerState.close() }
         ModalNavigationDrawer(
-            drawerState = rememberDrawerState(if (drawerOpen) DrawerValue.Open else DrawerValue.Closed),
+            drawerState = drawerState,
+            onDismissRequest = { drawerOpen = false },
             drawerContent = {
                 ModalDrawerSheet(modifier = Modifier.width(290.dp), drawerContainerColor = Color(0xFF08131D)) {
                     Spacer(Modifier.height(18.dp))
                     Text("G.I // CONTROL DECK", color = CYAN, fontSize = 18.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(18.dp))
                     listOf("Home", "Project Manager", "Build History", "Download Manager", "Console", "Settings", "Advanced Tools").forEach { item ->
                         NavigationDrawerItem(label = { Text(item) }, selected = page == item,
-                            onClick = { page = item; drawerOpen = false }, modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                            onClick = { page = item; drawerOpen = false; scope.launch { drawerState.close() } }, modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
                             colors = NavigationDrawerItemDefaults.colors(selectedContainerColor = CYAN.copy(alpha = .13f), selectedTextColor = CYAN, unselectedTextColor = Color.LightGray))
                     }
                     Spacer(Modifier.weight(1f))
@@ -222,6 +231,7 @@ private fun GIApp(context: Context) {
                 }) { padding ->
                     Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(if (compact) 12.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         when (page) {
+                            "Splash" -> { SplashScreen() }
                             "Home" -> {
                                 NeonCard(neon) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -310,7 +320,8 @@ private fun GIApp(context: Context) {
                                     OutlinedTextField(repo, { repo = it }, label = { Text("Repository (owner/name)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                                     OutlinedTextField(branch, { branch = it }, label = { Text("Branch") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                                     OutlinedTextField(token, { token = it }, label = { Text("Personal Access Token") }, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = if (showToken) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(), trailingIcon = { IconButton(onClick = { showToken = !showToken }) { Icon(if (showToken) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
-                                    Button(onClick = { store.put("repo", repo.trim()); store.put("branch", branch.ifBlank { "main" }.trim()); store.put("token", token); message = "Settings saved."; log(message) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Save, null); Text(" SAVE CONNECTION") }
+                                    Button(onClick = { val savedBranch = branch.ifBlank { "main" }.trim(); branch = savedBranch; store.put("repo", repo.trim()); store.put("branch", savedBranch); store.put("token", token); message = "Settings saved successfully on this device."; status = "READY"; log(message) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Save, null); Text(" SAVE CONNECTION") }
+                                    Text(message, color = if (status == "ERROR" || message.contains("failed", true) || message.contains("error", true)) RED else GREEN, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
                                     OutlinedButton(onClick = { scope.launch { try { api("GET", "https://api.github.com/repos/${repository()}"); message = "GitHub connection successful"; log(message) } catch (e: Exception) { message = e.message ?: "Connection failed"; log("Connection test failed: $message") } } }, modifier = Modifier.fillMaxWidth()) { Text("TEST CONNECTION") }
                                 }
                                 NeonCard(neon) {
@@ -341,6 +352,43 @@ private fun GIApp(context: Context) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SplashScreen() {
+    val transition = rememberInfiniteTransition(label = "gi-splash")
+    val rotation by transition.animateFloat(
+        initialValue = -8f,
+        targetValue = 8f,
+        animationSpec = infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "rotation"
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "pulse"
+    )
+    Box(Modifier.fillMaxWidth().padding(vertical = 34.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Box(
+                Modifier.size(148.dp).graphicsLayer {
+                    rotationY = rotation
+                    scaleX = pulse
+                    scaleY = pulse
+                    cameraDistance = 12f * density
+                    shadowElevation = 26.dp.toPx()
+                }.background(Brush.linearGradient(listOf(CYAN, Color(0xFF123C55), GOLD)), RoundedCornerShape(30.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Memory, contentDescription = "G.I logo", tint = BG, modifier = Modifier.size(92.dp))
+            }
+            Text("G.I APK BUILDER", color = CYAN, fontSize = 24.sp, fontWeight = FontWeight.Black)
+            Text("GOLDEN CYBER CORE", color = GOLD, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            LinearProgressIndicator(modifier = Modifier.width(190.dp), color = GREEN, trackColor = PANEL)
+            Text("POWERED BY I KO KO", color = CYAN, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
