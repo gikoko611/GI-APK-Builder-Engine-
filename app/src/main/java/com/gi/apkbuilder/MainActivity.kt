@@ -204,7 +204,7 @@ private fun GIApp(context: Context) {
         LaunchedEffect(drawerOpen) { if (drawerOpen) drawerState.open() else drawerState.close() }
         ModalNavigationDrawer(
             drawerState = drawerState,
-            onDismissRequest = { drawerOpen = false },
+            gesturesEnabled = false,
             drawerContent = {
                 ModalDrawerSheet(modifier = Modifier.width(290.dp), drawerContainerColor = Color(0xFF08131D)) {
                     Spacer(Modifier.height(18.dp))
