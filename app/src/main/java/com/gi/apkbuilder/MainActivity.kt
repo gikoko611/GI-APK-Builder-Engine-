@@ -229,7 +229,7 @@ private fun GIApp(context: Context) {
                     while (true) {
                         val entry = zip.nextEntry ?: break
                         if (!entry.isDirectory) {
-                            var path = entry.name.replace('\\\\', '/')
+                            var path = entry.name.replace('\\', '/')
                             if (path.startsWith("/") || path.split("/").any { it == ".." } || path.contains(":")) {
                                 throw IOException("Unsafe ZIP path rejected: $path")
                             }
