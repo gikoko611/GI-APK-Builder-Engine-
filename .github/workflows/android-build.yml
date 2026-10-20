@@ -1,4 +1,4 @@
-name: Build G.I Notes APK
+name: Build G.I APK Builder
 on:
   workflow_dispatch:
   push:
@@ -24,6 +24,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GI-Notes-debug-APK
+          name: GI-APK-Builder-debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
