@@ -3,6 +3,7 @@ package com.gi.apkbuilder
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -48,6 +49,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -102,6 +105,9 @@ private fun GIApp(context: Context) {
     var progress by remember { mutableFloatStateOf(0f) }
     var console by remember { mutableStateOf("G.I APK BUILDER // GOLDEN CYBER CORE\nSystem initialized.\nWaiting for GitHub configuration…") }
     var selectedZip by remember { mutableStateOf("") }
+    var selectedZipUri by remember { mutableStateOf<Uri?>(null) }
+    var uploadBusy by remember { mutableStateOf(false) }
+    var uploadProgress by remember { mutableStateOf("") }
     var history by remember { mutableStateOf(listOf<RunInfo>()) }
     var autoRefresh by remember { mutableStateOf(store.bool("autoRefresh", true)) }
     var autoDownload by remember { mutableStateOf(store.bool("autoDownload", false)) }
@@ -118,7 +124,12 @@ private fun GIApp(context: Context) {
         val b = Request.Builder().url(url).header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28").header("Authorization", "Bearer $token")
             .header("User-Agent", "GI-APK-Builder")
-        if (method == "POST") b.post((body ?: "{}").toRequestBody("application/json; charset=utf-8".toMediaType())) else b.get()
+        when (method) {
+            "POST" -> b.post((body ?: "{}").toRequestBody("application/json; charset=utf-8".toMediaType()))
+            "PATCH" -> b.patch((body ?: "{}").toRequestBody("application/json; charset=utf-8".toMediaType()))
+            "PUT" -> b.put((body ?: "{}").toRequestBody("application/json; charset=utf-8".toMediaType()))
+            else -> b.get()
+        }
         client.newCall(b.build()).execute().use { res ->
             val text = res.body?.string().orEmpty()
             if (!res.isSuccessful) throw IOException("GitHub API HTTP ${res.code}: ${text.take(500)}")
@@ -190,7 +201,110 @@ private fun GIApp(context: Context) {
     }
 
     val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) { selectedZip = uri.lastPathSegment ?: uri.toString(); log("ZIP selected: $selectedZip"); message = "ZIP selected locally; repository upload is not implemented yet." }
+        if (uri != null) {
+            selectedZipUri = uri
+            selectedZip = uri.lastPathSegment ?: uri.toString()
+            log("ZIP selected: $selectedZip")
+            message = "ZIP ready. Tap UPLOAD ZIP TO GITHUB to send its project files to the configured repository."
+            status = "ZIP READY"
+            try { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) { }
+        }
+    }
+
+    suspend fun uploadSelectedZip() {
+        val uri = selectedZipUri ?: throw IOException("Select a project ZIP first.")
+        val r = repository()
+        val targetBranch = branch.ifBlank { "main" }.trim()
+        uploadBusy = true
+        status = "UPLOADING"
+        uploadProgress = "Reading ZIP…"
+        try {
+            store.put("repo", repo.trim())
+            store.put("branch", targetBranch)
+            store.put("token", token)
+            val entries = mutableListOf<Pair<String, ByteArray>>()
+            var totalBytes = 0L
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                ZipInputStream(input).use { zip ->
+                    while (true) {
+                        val entry = zip.nextEntry ?: break
+                        if (!entry.isDirectory) {
+                            var path = entry.name.replace('\\\\', '/')
+                            if (path.startsWith("/") || path.split("/").any { it == ".." } || path.contains(":")) {
+                                throw IOException("Unsafe ZIP path rejected: $path")
+                            }
+                            path = path.trimStart('/')
+                            val out = ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val n = zip.read(buffer)
+                                if (n < 0) break
+                                totalBytes += n
+                                if (totalBytes > 50L * 1024L * 1024L) throw IOException("ZIP expands beyond 50 MB. Please use a smaller project ZIP.")
+                                out.write(buffer, 0, n)
+                            }
+                            if (path.isNotBlank()) entries.add(path to out.toByteArray())
+                            if (entries.size > 500) throw IOException("ZIP has more than 500 files. Please split the project.")
+                        }
+                        zip.closeEntry()
+                    }
+                }
+            } ?: throw IOException("Cannot read the selected ZIP.")
+            if (entries.isEmpty()) throw IOException("The ZIP contains no files.")
+
+            val firstSegments = entries.map { it.first.substringBefore('/') }.distinct()
+            val hasRootFiles = entries.any { !it.first.contains('/') }
+            val normalized = if (firstSegments.size == 1 && !hasRootFiles && entries.all { it.first.contains('/') }) {
+                val prefix = firstSegments.first() + "/"
+                entries.map { it.first.removePrefix(prefix) to it.second }
+            } else entries
+            if (normalized.any { it.first.isBlank() || it.first.split("/").any { part -> part.isBlank() || part == "." || part == ".." } }) {
+                throw IOException("ZIP contains an invalid file path.")
+            }
+            if (normalized.map { it.first }.distinct().size != normalized.size) throw IOException("ZIP contains duplicate file paths.")
+
+            uploadProgress = "Checking target branch…"
+            val encodedBranch = java.net.URLEncoder.encode(targetBranch, "UTF-8").replace("+", "%20")
+            val refJson = JSONObject(api("GET", "https://api.github.com/repos/$r/git/ref/heads/$encodedBranch"))
+            val baseCommitSha = refJson.getJSONObject("object").getString("sha")
+            val commitJson = JSONObject(api("GET", "https://api.github.com/repos/$r/git/commits/$baseCommitSha"))
+            val baseTreeSha = commitJson.getJSONObject("tree").getString("sha")
+            val treeEntries = JSONArray()
+            normalized.forEachIndexed { index, item ->
+                uploadProgress = "Uploading file ${index + 1}/${normalized.size}…"
+                val blobJson = JSONObject()
+                    .put("content", Base64.encodeToString(item.second, Base64.NO_WRAP))
+                    .put("encoding", "base64")
+                val blob = JSONObject(api("POST", "https://api.github.com/repos/$r/git/blobs", blobJson.toString()))
+                treeEntries.put(JSONObject()
+                    .put("path", item.first)
+                    .put("mode", "100644")
+                    .put("type", "blob")
+                    .put("sha", blob.getString("sha")))
+            }
+            uploadProgress = "Creating Git commit…"
+            val treeBody = JSONObject().put("base_tree", baseTreeSha).put("tree", treeEntries)
+            val newTree = JSONObject(api("POST", "https://api.github.com/repos/$r/git/trees", treeBody.toString()))
+            val commitBody = JSONObject()
+                .put("message", "Upload Android project ZIP from G.I APK Builder")
+                .put("tree", newTree.getString("sha"))
+                .put("parents", JSONArray().put(baseCommitSha))
+            val newCommit = JSONObject(api("POST", "https://api.github.com/repos/$r/git/commits", commitBody.toString()))
+            uploadProgress = "Updating branch…"
+            api("PATCH", "https://api.github.com/repos/$r/git/refs/heads/$encodedBranch",
+                JSONObject().put("sha", newCommit.getString("sha")).put("force", false).toString())
+            status = "UPLOAD SUCCESS"
+            message = "Uploaded ${normalized.size} files to $r ($targetBranch). You can now start the cloud build."
+            uploadProgress = "Done • ${normalized.size} files"
+            log(message)
+        } catch (e: Exception) {
+            status = "ERROR"
+            message = e.message ?: "ZIP upload failed."
+            uploadProgress = "Upload failed"
+            log("ZIP upload failed: $message")
+        } finally {
+            uploadBusy = false
+        }
     }
     val saveLogPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri: Uri? ->
         if (uri != null) try {
@@ -268,9 +382,19 @@ private fun GIApp(context: Context) {
                             "Project Manager" -> NeonCard(neon) {
                                 Text("PROJECT MANAGER", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
                                 Text("Choose a source ZIP from your device.", color = MUTED)
-                                Button(onClick = { zipPicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*")) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.UploadFile, null); Text("  SELECT PROJECT ZIP") }
-                                if (selectedZip.isNotBlank()) Text("Selected: $selectedZip", color = GOLD)
-                                Text("Note: selected ZIP is not uploaded to GitHub automatically in this edition.", color = RED, fontSize = 11.sp)
+                                Button(onClick = { zipPicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*")) }, modifier = Modifier.fillMaxWidth(), enabled = !uploadBusy) { Icon(Icons.Default.UploadFile, null); Text("  SELECT PROJECT ZIP") }
+                                if (selectedZip.isNotBlank()) {
+                                    Text("Selected: $selectedZip", color = GOLD, fontSize = 12.sp)
+                                    if (uploadBusy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = GREEN)
+                                    if (uploadProgress.isNotBlank()) Text(uploadProgress, color = if (status == "ERROR") RED else MUTED, fontSize = 11.sp)
+                                    Button(onClick = { scope.launch { uploadSelectedZip() } }, modifier = Modifier.fillMaxWidth(), enabled = !uploadBusy) {
+                                        if (uploadBusy) CircularProgressIndicator(Modifier.size(18.dp), color = BG, strokeWidth = 2.dp) else Icon(Icons.Default.CloudUpload, null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(if (uploadBusy) "UPLOADING PROJECT…" else "UPLOAD ZIP TO GITHUB")
+                                    }
+                                    Text("Upload replaces matching paths and adds new files. Existing files not present in the ZIP are kept.", color = MUTED, fontSize = 11.sp)
+                                }
+                                Text("Configure a repository, branch, and token with Contents and Workflows write access in Settings. ZIP upload creates one commit.", color = MUTED, fontSize = 11.sp)
                             }
                             "Build History" -> NeonCard(neon) {
                                 Text("BUILD HISTORY", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
