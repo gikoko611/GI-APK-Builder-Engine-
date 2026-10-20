@@ -5,5 +5,5 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories { google(); mavenCentral() }
 }
-rootProject.name = "GI-Note-App-Test"
+rootProject.name = "GI-APK-Builder-Engine"
 include(":app")
