@@ -1,11 +1,19 @@
-name: G.I Android APK Build
+name: G.I APK Builder - Golden Edition
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - 'settings.gradle.kts'
+      - '.github/workflows/android-build.yml'
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: gi-apk-builder-${{ github.ref }}
@@ -13,96 +21,42 @@ concurrency:
 
 jobs:
   build:
+    name: Build G.I APK Builder
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     steps:
-      - name: Checkout build engine
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Download uploaded project ZIP from repository
-        run: |
-          test -f incoming/project.zip || { echo "::error::incoming/project.zip missing. Upload a project ZIP from G.I APK Builder first."; exit 1; }
-          mkdir -p work
-          python3 - <<'PY'
-          import zipfile
-          z=zipfile.ZipFile("incoming/project.zip")
-          bad=z.testzip()
-          if bad:
-              raise SystemExit(f"Invalid ZIP member: {bad}")
-          z.extractall("work")
-          PY
-
-      - name: Locate Gradle Android project
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT=""
-          if [[ -f work/settings.gradle || -f work/settings.gradle.kts ]]; then ROOT="work"; fi
-          if [[ -z "$ROOT" ]]; then
-            while IFS= read -r -d '' f; do
-              d="$(dirname "$f")"
-              if [[ -f "$d/settings.gradle" || -f "$d/settings.gradle.kts" ]]; then ROOT="$d"; break; fi
-            done < <(find work -maxdepth 4 \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
-          fi
-          if [[ -z "$ROOT" ]]; then echo "::error::Could not find settings.gradle(.kts) in uploaded ZIP."; exit 1; fi
-          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Android project root: $ROOT"
-
-      - name: Validate project
-        run: |
-          test -f "${{ steps.locate.outputs.root }}/gradlew" || echo "No Gradle wrapper found; using installed Gradle."
-          test -f "${{ steps.locate.outputs.root }}/build.gradle" -o -f "${{ steps.locate.outputs.root }}/build.gradle.kts" || {
-            echo "::error::Root build.gradle(.kts) not found."; exit 1;
-          }
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
 
-      - name: Build APK
-        working-directory: ${{ steps.locate.outputs.root }}
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-        run: |
-          set -euo pipefail
-          if [[ -f ./gradlew ]]; then
-            chmod +x ./gradlew
-            ./gradlew --no-daemon assembleDebug
-            ./gradlew --no-daemon assembleRelease || echo "Release variant unavailable; debug APK will still be provided."
-          else
-            gradle --no-daemon assembleDebug
-            gradle --no-daemon assembleRelease || echo "Release variant unavailable; debug APK will still be provided."
-          fi
+      - name: Build Debug APK
+        run: gradle --no-daemon assembleDebug
 
-      - name: Prepare artifact
-        shell: bash
-        working-directory: ${{ steps.locate.outputs.root }}
+      - name: Verify APK
         run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          find . -path '*/build/outputs/apk/*' -type f -name '*.apk' -exec cp {} "$GITHUB_WORKSPACE/out/" \;
-          if ! find "$GITHUB_WORKSPACE/out" -name '*.apk' -type f | grep -q .; then
-            echo "::error::No APK was generated. Check the Gradle build log."
-            exit 1
-          fi
-          ls -lh "$GITHUB_WORKSPACE/out"
+          set -eu
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          ls -lh "$APK"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: gi-apk
-          path: out/*.apk
+          name: gi-apk-builder-debug
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
