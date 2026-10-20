@@ -1,16 +1,23 @@
 package com.gi.apkbuilder
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -18,9 +25,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.security.crypto.EncryptedSharedPreferences
@@ -29,356 +39,345 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Base64
-import java.util.zip.ZipInputStream
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 
-private val Bg = Color(0xFF080B0A)
-private val Panel = Color(0xFF121916)
-private val Gold = Color(0xFFFFC857)
-private val Green = Color(0xFF49FF9A)
-private val Muted = Color(0xFF9AA9A0)
-private val Red = Color(0xFFFF6464)
+private val BG = Color(0xFF050B12)
+private val PANEL = Color(0xE6111D2A)
+private val CYAN = Color(0xFF35F2FF)
+private val GOLD = Color(0xFFFFC857)
+private val GREEN = Color(0xFF5BFFB2)
+private val RED = Color(0xFFFF647C)
+private val MUTED = Color(0xFF8FA8BC)
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent { GITheme { BuilderScreen(this) } }
-    }
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContent { GIApp(this) } }
 }
 
+private class Store(context: Context) {
+    private val prefs = try {
+        val key = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        EncryptedSharedPreferences.create(context, "gi_builder", key,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+    } catch (_: Exception) { context.getSharedPreferences("gi_builder_fallback", Context.MODE_PRIVATE) }
+    fun get(k: String, d: String = "") = prefs.getString(k, d) ?: d
+    fun put(k: String, v: String) { prefs.edit().putString(k, v).apply() }
+    fun bool(k: String, d: Boolean = false) = prefs.getBoolean(k, d)
+    fun putBool(k: String, v: Boolean) { prefs.edit().putBoolean(k, v).apply() }
+}
+private data class RunInfo(val id: Long, val status: String, val conclusion: String, val updated: String)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GITheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Gold, secondary = Green, background = Bg, surface = Panel,
-            onPrimary = Bg, onSecondary = Bg, onBackground = Color.White, onSurface = Color.White
-        ),
-        content = content
-    )
-}
-
-private fun securePrefs(context: Context) = try {
-    val key = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
-    EncryptedSharedPreferences.create(
-        context, "gi_builder_secure",
-        key,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
-} catch (_: Exception) {
-    context.getSharedPreferences("gi_builder_secure_fallback", Context.MODE_PRIVATE)
-}
-
-@Composable
-private fun BuilderScreen(context: Context) {
-    val prefs = remember { securePrefs(context) }
-    var owner by remember { mutableStateOf(prefs.getString("owner", "") ?: "") }
-    var repo by remember { mutableStateOf(prefs.getString("repo", "") ?: "") }
-    var token by remember { mutableStateOf(prefs.getString("token", "") ?: "") }
-    var branch by remember { mutableStateOf(prefs.getString("branch", "main") ?: "main") }
-    var zipUri by remember { mutableStateOf<Uri?>(null) }
-    var zipName by remember { mutableStateOf("No project ZIP selected") }
-    var status by remember { mutableStateOf("READY") }
-    var details by remember { mutableStateOf("Connect GitHub, import an Android Gradle project ZIP, then build.") }
-    var busy by remember { mutableStateOf(false) }
-    var runId by remember { mutableStateOf<Long?>(null) }
-    var progressStage by remember { mutableStateOf(0) }
+private fun GIApp(context: Context) {
+    val store = remember { Store(context) }
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val client = remember { OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build() }
+    var repo by remember { mutableStateOf(store.get("repo")) }
+    var branch by remember { mutableStateOf(store.get("branch", "main")) }
+    var token by remember { mutableStateOf(store.get("token")) }
+    var page by remember { mutableStateOf("Home") }
+    var drawerOpen by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("READY") }
+    var message by remember { mutableStateOf("Configure GitHub connection to start a cloud build.") }
+    var runId by remember { mutableLongStateOf(0L) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var console by remember { mutableStateOf("G.I APK BUILDER // GOLDEN CYBER CORE\nSystem initialized.\nWaiting for GitHub configuration…") }
+    var selectedZip by remember { mutableStateOf("") }
+    var history by remember { mutableStateOf(listOf<RunInfo>()) }
+    var autoRefresh by remember { mutableStateOf(store.bool("autoRefresh", true)) }
+    var autoDownload by remember { mutableStateOf(store.bool("autoDownload", false)) }
+    var neon by remember { mutableStateOf(store.bool("neon", true)) }
+    var compact by remember { mutableStateOf(store.bool("compact", false)) }
+    var showToken by remember { mutableStateOf(false) }
 
-    val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            zipUri = uri
-            zipName = uri.lastPathSegment?.substringAfterLast('/') ?: "Project ZIP selected"
-            status = "ZIP SELECTED"
-            details = "Selected project archive. Make sure it contains settings.gradle(.kts) and an app module."
+    fun log(line: String) {
+        val t = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        console = (console + "\n[$t] $line").takeLast(24000)
+    }
+    suspend fun api(method: String, url: String, body: String? = null): String = withContext(Dispatchers.IO) {
+        if (token.isBlank()) throw IOException("GitHub token missing. Open Settings → GitHub Connection.")
+        val b = Request.Builder().url(url).header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28").header("Authorization", "Bearer $token")
+            .header("User-Agent", "GI-APK-Builder")
+        if (method == "POST") b.post((body ?: "{}").toRequestBody("application/json; charset=utf-8".toMediaType())) else b.get()
+        client.newCall(b.build()).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            if (!res.isSuccessful) throw IOException("GitHub API HTTP ${res.code}: ${text.take(500)}")
+            text
         }
     }
-
-    fun saveSettings() {
-        prefs.edit().putString("owner", owner.trim()).putString("repo", repo.trim())
-            .putString("token", token.trim()).putString("branch", branch.trim()).apply()
+    fun repository(): String {
+        val r = repo.trim().trim('/')
+        require(r.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Repository must use owner/repository format." }
+        return r
     }
-
-    Column(
-        Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(14.dp), color = Gold, modifier = Modifier.size(52.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text("G.I", color = Bg, fontWeight = FontWeight.Black, fontSize = 19.sp)
+    suspend fun refresh() {
+        val r = repository()
+        val data = JSONObject(api("GET", "https://api.github.com/repos/$r/actions/runs?per_page=10"))
+        val runs = data.optJSONArray("workflow_runs") ?: JSONArray()
+        history = (0 until runs.length()).map { i ->
+            val x = runs.getJSONObject(i)
+            RunInfo(x.optLong("id"), x.optString("status"), x.optString("conclusion", "pending"), x.optString("updated_at"))
+        }
+        val first = history.firstOrNull()
+        if (first == null) { status = "NO RUN"; message = "No workflow runs found."; log(message); return }
+        runId = first.id
+        status = first.status.uppercase()
+        message = "Run #$runId • $status • ${first.conclusion}"
+        log("Workflow status: #$runId $status ${first.conclusion}")
+        if (first.status == "completed" && first.conclusion == "success") log("BUILD SUCCESS. Open Download Manager to access artifacts.")
+        if (first.status == "completed" && first.conclusion != "success") log("BUILD FAILED. Open GitHub Actions for step-by-step runner logs.")
+    }
+    suspend fun startBuild() {
+        busy = true; status = "STARTING"; progress = .05f
+        try {
+            val r = repository()
+            store.put("repo", repo.trim()); store.put("branch", branch.ifBlank { "main" }.trim()); store.put("token", token)
+            log("Checking repository: $r")
+            api("GET", "https://api.github.com/repos/$r")
+            val wfJson = JSONObject(api("GET", "https://api.github.com/repos/$r/actions/workflows"))
+            val wfs = wfJson.optJSONArray("workflows") ?: JSONArray()
+            var wf = "android-build.yml"
+            for (i in 0 until wfs.length()) {
+                val path = wfs.getJSONObject(i).optString("path")
+                if (path.endsWith("android-build.yml") || path.endsWith("android.yml")) { wf = path.substringAfterLast("/"); break }
+            }
+            log("Dispatching $wf on ${branch.ifBlank { "main" }}")
+            api("POST", "https://api.github.com/repos/$r/actions/workflows/$wf/dispatches",
+                JSONObject().put("ref", branch.ifBlank { "main" }).toString())
+            status = "QUEUED"; message = "Workflow dispatched."; progress = .15f
+            log("Workflow dispatch accepted. Polling for run…")
+            var found = false
+            repeat(10) {
+                delay(2500)
+                try {
+                    refresh()
+                    if (runId > 0L) { found = true; status = if (status == "COMPLETED") status else "RUNNING"; progress = .35f; return@repeat }
+                } catch (e: Exception) { log("Polling: ${e.message}") }
+            }
+            if (found) {
+                repeat(30) {
+                    delay(5000)
+                    refresh()
+                    progress = (progress + .02f).coerceAtMost(.95f)
+                    if (status == "COMPLETED") return@repeat
                 }
             }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("G.I APK BUILDER", color = Gold, fontWeight = FontWeight.Black, fontSize = 21.sp)
-                Text("GOLDEN EDITION  •  CLOUD BUILD CORE", color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-            Icon(Icons.Default.Bolt, null, tint = Green, modifier = Modifier.size(30.dp))
-        }
+            progress = 1f
+            message = "Workflow status: $status"
+        } catch (e: Exception) {
+            status = "ERROR"; message = e.message ?: "Unknown error"; log("ERROR: $message")
+        } finally { busy = false }
+    }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatChip("ENGINE", "GITHUB ACTIONS", Green, Modifier.weight(1f))
-            StatChip("STATUS", status, if (status.contains("FAIL", true)) Red else Gold, Modifier.weight(1f))
-        }
+    val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) { selectedZip = uri.lastPathSegment ?: uri.toString(); log("ZIP selected: $selectedZip"); message = "ZIP selected locally; repository upload is not implemented yet." }
+    }
+    val saveLogPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri: Uri? ->
+        if (uri != null) try {
+            context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(console) }
+            log("Console exported to text file.")
+        } catch (e: Exception) { log("Export error: ${e.message}") }
+    }
 
-        SectionCard("01  /  GITHUB CONNECTION", Icons.Default.Link) {
-            OutlinedField("GitHub owner / username", owner, { owner = it }, singleLine = true)
-            OutlinedField("Repository name", repo, { repo = it }, singleLine = true)
-            OutlinedField("Fine-grained token", token, { token = it }, secret = true, singleLine = true)
-            OutlinedField("Default branch", branch, { branch = it }, singleLine = true)
-            GoldButton("SAVE CONNECTION SETTINGS", enabled = !busy) { saveSettings(); details = "Settings saved on this device." }
-            GreenButton("TEST GITHUB CONNECTION", enabled = !busy) {
-                scope.launch {
-                    busy = true; status = "CONNECTING"
-                    try {
-                        saveSettings()
-                        val result = withContext(Dispatchers.IO) { GitHubApi(owner, repo, token).testConnection() }
-                        status = "CONNECTED"; details = result
-                    } catch (e: Exception) {
-                        status = "CONNECTION FAILED"; details = e.message ?: "Unknown error"
+    MaterialTheme(colorScheme = darkColorScheme(primary = CYAN, secondary = GOLD, background = BG, surface = PANEL, onBackground = Color.White, onSurface = Color.White, error = RED)) {
+        ModalNavigationDrawer(
+            drawerState = rememberDrawerState(if (drawerOpen) DrawerValue.Open else DrawerValue.Closed),
+            drawerContent = {
+                ModalDrawerSheet(modifier = Modifier.width(290.dp), drawerContainerColor = Color(0xFF08131D)) {
+                    Spacer(Modifier.height(18.dp))
+                    Text("G.I // CONTROL DECK", color = CYAN, fontSize = 18.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(18.dp))
+                    listOf("Home", "Project Manager", "Build History", "Download Manager", "Console", "Settings", "Advanced Tools").forEach { item ->
+                        NavigationDrawerItem(label = { Text(item) }, selected = page == item,
+                            onClick = { page = item; drawerOpen = false }, modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                            colors = NavigationDrawerItemDefaults.colors(selectedContainerColor = CYAN.copy(alpha = .13f), selectedTextColor = CYAN, unselectedTextColor = Color.LightGray))
                     }
-                    busy = false
+                    Spacer(Modifier.weight(1f))
+                    Text("GOLDEN CYBER • v1.0.0", color = MUTED, modifier = Modifier.padding(18.dp), fontSize = 11.sp)
                 }
             }
-        }
-
-        SectionCard("02  /  PROJECT IMPORT", Icons.Default.FolderZip) {
-            Text(zipName, color = Muted, fontSize = 13.sp)
-            GoldButton("SELECT PROJECT ZIP", enabled = !busy) { zipPicker.launch(arrayOf("application/zip", "application/octet-stream")) }
-            Text("ZIP must contain a Gradle Android project at its root, or inside one top-level folder.", color = Muted, fontSize = 11.sp)
-        }
-
-        SectionCard("03  /  BUILD CONSOLE", Icons.Default.Terminal) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).background(if (busy) Gold else Green, RoundedCornerShape(50)))
-                Spacer(Modifier.width(8.dp))
-                Text(status, color = if (status.contains("FAIL", true)) Red else Green, fontWeight = FontWeight.Bold)
-            }
-            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Green, trackColor = Color(0xFF26332C))
-            Text(details, color = Muted, fontSize = 12.sp)
-            if (runId != null) Text("Workflow Run ID: $runId", color = Gold, fontSize = 12.sp)
-            GoldButton("BUILD APK ON GITHUB", enabled = !busy) {
-                scope.launch {
-                    busy = true; runId = null; progressStage = 0
-                    try {
-                        saveSettings()
-                        val uri = zipUri ?: throw IllegalStateException("Select a project ZIP first.")
-                        if (owner.isBlank() || repo.isBlank() || token.isBlank()) throw IllegalStateException("Enter GitHub owner, repository and token first.")
-                        status = "UPLOADING SOURCE"; details = "Uploading ZIP to repository..."
-                        val bytes = withContext(Dispatchers.IO) { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Cannot read selected ZIP") }
-                        if (bytes.size > 45 * 1024 * 1024) throw IllegalStateException("ZIP is larger than 45 MB. Reduce its size and try again.")
-                        withContext(Dispatchers.IO) { GitHubApi(owner, repo, token).uploadZip(bytes, branch) }
-                        status = "STARTING WORKFLOW"; details = "Source uploaded. Starting android-build workflow..."
-                        withContext(Dispatchers.IO) { GitHubApi(owner, repo, token).dispatch(branch) }
-                        status = "WAITING FOR RUN"; details = "Workflow dispatched. Waiting for GitHub Actions..."
-                        val api = GitHubApi(owner, repo, token)
-                        var found: Long? = null
-                        for (attempt in 0 until 30) {
-                            delay(5000)
-                            found = withContext(Dispatchers.IO) { api.findLatestRun() }
-                            if (found != null) break
+        ) {
+            Box(Modifier.fillMaxSize().background(BG)) {
+                CyberBackground()
+                Scaffold(containerColor = Color.Transparent, topBar = {
+                    TopAppBar(
+                        title = { Column { Text("G.I APK BUILDER", color = CYAN, fontWeight = FontWeight.Black, fontSize = 16.sp); Text("GOLDEN CYBER 3D • CLOUD BUILD CORE", color = GOLD, fontSize = 9.sp) } },
+                        navigationIcon = { IconButton(onClick = { drawerOpen = true }) { Icon(Icons.Default.Menu, "Menu", tint = CYAN) } },
+                        actions = { IconButton(onClick = { scope.launch { try { refresh() } catch (e: Exception) { log("Refresh error: ${e.message}") } } }) { Icon(Icons.Default.Refresh, "Refresh", tint = GREEN) } },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xDD07111B))
+                    )
+                }) { padding ->
+                    Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(if (compact) 12.dp else 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        when (page) {
+                            "Home" -> {
+                                NeonCard(neon) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text("BUILD CONTROL CENTER", color = GOLD, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            Spacer(Modifier.height(6.dp))
+                                            Text("Build Android APK\nfrom GitHub Actions", fontSize = 22.sp, fontWeight = FontWeight.Black, lineHeight = 27.sp)
+                                            Text("Powered by I KO KO", color = CYAN, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                                        }
+                                        Box(Modifier.size(70.dp).background(CYAN.copy(alpha = .09f), CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Default.Memory, null, tint = CYAN, modifier = Modifier.size(46.dp)) }
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    StatCard("STATUS", status, if (status == "ERROR") RED else GREEN, Modifier.weight(1f), neon)
+                                    StatCard("RUN ID", if (runId > 0) "#$runId" else "—", GOLD, Modifier.weight(1f), neon)
+                                }
+                                NeonCard(neon) {
+                                    Text("BUILD PIPELINE", color = CYAN, fontWeight = FontWeight.Bold)
+                                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(7.dp), color = GREEN, trackColor = Color(0xFF243340))
+                                    Text(message, color = MUTED, fontSize = 12.sp)
+                                    Button(onClick = { scope.launch { startBuild() } }, enabled = !busy, modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = CYAN, contentColor = BG)) {
+                                        if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = BG, strokeWidth = 2.dp) else Icon(Icons.Default.RocketLaunch, null)
+                                        Spacer(Modifier.width(8.dp)); Text(if (busy) "BUILD IN PROGRESS…" else "START CLOUD BUILD", fontWeight = FontWeight.Black)
+                                    }
+                                    OutlinedButton(onClick = { page = "Console" }, modifier = Modifier.fillMaxWidth(), border = BorderStroke(1.dp, GOLD)) { Icon(Icons.Default.Terminal, null, tint = GOLD); Spacer(Modifier.width(8.dp)); Text("OPEN BUILD CONSOLE", color = GOLD) }
+                                }
+                                NeonCard(neon) {
+                                    Text("QUICK ACCESS", color = GOLD, fontWeight = FontWeight.Bold)
+                                    listOf("Project Manager", "Build History", "Download Manager", "Settings").forEach { p ->
+                                        OutlinedButton(onClick = { page = p }, modifier = Modifier.fillMaxWidth()) { Text(p) }
+                                    }
+                                }
+                            }
+                            "Project Manager" -> NeonCard(neon) {
+                                Text("PROJECT MANAGER", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                Text("Choose a source ZIP from your device.", color = MUTED)
+                                Button(onClick = { zipPicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*")) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.UploadFile, null); Text("  SELECT PROJECT ZIP") }
+                                if (selectedZip.isNotBlank()) Text("Selected: $selectedZip", color = GOLD)
+                                Text("Note: selected ZIP is not uploaded to GitHub automatically in this edition.", color = RED, fontSize = 11.sp)
+                            }
+                            "Build History" -> NeonCard(neon) {
+                                Text("BUILD HISTORY", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                Button(onClick = { scope.launch { try { refresh() } catch (e: Exception) { log(e.message ?: "Refresh failed") } } }) { Icon(Icons.Default.Refresh, null); Text(" REFRESH") }
+                                if (history.isEmpty()) Text("No build history loaded.", color = MUTED)
+                                history.forEach { r ->
+                                    HorizontalDivider(color = CYAN.copy(alpha = .2f))
+                                    Text("RUN #${r.id}", color = GOLD, fontWeight = FontWeight.Bold)
+                                    Text("${r.status.uppercase()} • ${r.conclusion.uppercase()}", color = if (r.conclusion == "success") GREEN else MUTED)
+                                    Text(r.updated, color = MUTED, fontSize = 10.sp)
+                                }
+                            }
+                            "Download Manager" -> NeonCard(neon) {
+                                Text("DOWNLOAD MANAGER", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                Text("Current workflow run: ${if (runId > 0) "#$runId" else "not selected"}", color = MUTED)
+                                Button(onClick = {
+                                    scope.launch {
+                                        try {
+                                            val r = repository()
+                                            val json = JSONObject(api("GET", "https://api.github.com/repos/$r/actions/runs/$runId/artifacts"))
+                                            val arr = json.optJSONArray("artifacts") ?: JSONArray()
+                                            if (arr.length() == 0) log("No artifacts found for run #$runId.")
+                                            else {
+                                                val art = arr.getJSONObject(0)
+                                                log("Artifact: ${art.optString("name")}")
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(art.optString("archive_download_url"))))
+                                                log("Opened artifact URL; GitHub authentication may be required.")
+                                            }
+                                        } catch (e: Exception) { log("Download error: ${e.message}") }
+                                    }
+                                }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Download, null); Text("  OPEN LATEST ARTIFACT") }
+                                Text("This opens GitHub's artifact download URL; direct APK extraction is not included yet.", color = RED, fontSize = 11.sp)
+                            }
+                            "Console" -> NeonCard(neon) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("BUILD CONSOLE", color = CYAN, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
+                                    IconButton(onClick = { clipboard.setText(AnnotatedString(console)); log("Console copied to clipboard.") }) { Icon(Icons.Default.ContentCopy, "Copy", tint = GOLD) }
+                                    IconButton(onClick = { saveLogPicker.launch("gi-build-console.txt") }) { Icon(Icons.Default.SaveAlt, "Export", tint = GREEN) }
+                                    IconButton(onClick = { console = "Console cleared." }) { Icon(Icons.Default.DeleteSweep, "Clear", tint = RED) }
+                                }
+                                Text("RUN #${if (runId > 0) runId else "—"} • $status", color = MUTED, fontSize = 11.sp)
+                                SelectionContainer { Text(console, color = Color(0xFFD5FBEA), fontSize = 11.sp, lineHeight = 17.sp) }
+                            }
+                            "Settings" -> {
+                                NeonCard(neon) {
+                                    Text("GITHUB CONNECTION", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                    OutlinedTextField(repo, { repo = it }, label = { Text("Repository (owner/name)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                    OutlinedTextField(branch, { branch = it }, label = { Text("Branch") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                    OutlinedTextField(token, { token = it }, label = { Text("Personal Access Token") }, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = if (showToken) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(), trailingIcon = { IconButton(onClick = { showToken = !showToken }) { Icon(if (showToken) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } })
+                                    Button(onClick = { store.put("repo", repo.trim()); store.put("branch", branch.ifBlank { "main" }.trim()); store.put("token", token); message = "Settings saved."; log(message) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Save, null); Text(" SAVE CONNECTION") }
+                                    OutlinedButton(onClick = { scope.launch { try { api("GET", "https://api.github.com/repos/${repository()}"); message = "GitHub connection successful"; log(message) } catch (e: Exception) { message = e.message ?: "Connection failed"; log("Connection test failed: $message") } } }, modifier = Modifier.fillMaxWidth()) { Text("TEST CONNECTION") }
+                                }
+                                NeonCard(neon) {
+                                    Text("BUILD SETTINGS", color = GOLD, fontWeight = FontWeight.Bold)
+                                    ToggleRow("Auto refresh build status", autoRefresh) { autoRefresh = it; store.putBool("autoRefresh", it) }
+                                    ToggleRow("Auto download on success", autoDownload) { autoDownload = it; store.putBool("autoDownload", it) }
+                                    Text("Auto-download is a saved preference only; it is not an automatic downloader yet.", color = MUTED, fontSize = 11.sp)
+                                }
+                                NeonCard(neon) {
+                                    Text("APPEARANCE", color = GOLD, fontWeight = FontWeight.Bold)
+                                    ToggleRow("Neon glow effects", neon) { neon = it; store.putBool("neon", it) }
+                                    ToggleRow("Compact layout", compact) { compact = it; store.putBool("compact", it) }
+                                }
+                                NeonCard(neon) {
+                                    Text("SECURITY", color = GOLD, fontWeight = FontWeight.Bold)
+                                    Text("Token is stored using AndroidX encrypted preferences where supported. Clear app data to remove all stored settings.", color = MUTED, fontSize = 12.sp)
+                                    TextButton(onClick = { token = ""; store.put("token", ""); log("Saved token cleared.") }) { Text("CLEAR SAVED TOKEN", color = RED) }
+                                }
+                            }
+                            "Advanced Tools" -> NeonCard(neon) {
+                                Text("ADVANCED TOOLS", color = CYAN, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                                Button(onClick = { scope.launch { try { val r = repository(); val result = api("GET", "https://api.github.com/repos/$r/actions/runs?per_page=1"); log("Diagnostics PASS. GitHub API response bytes=${result.length}."); message = "GitHub API reachable." } catch (e: Exception) { message = e.message ?: "Diagnostic failed"; log("DIAGNOSTIC ERROR: $message") } } }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.HealthAndSafety, null); Text("  RUN DIAGNOSTICS") }
+                                Text("403: check token scopes. 404: check repository or workflow filename. Build errors: inspect the actual GitHub Actions job logs.", color = MUTED, fontSize = 12.sp)
+                            }
                         }
-                        val id = found ?: throw IllegalStateException("Workflow run not found after 150 seconds. Check Actions tab and workflow_dispatch.")
-                        runId = id
-                        var completed = false
-                        var conclusion = ""
-                        status = "BUILD IN PROGRESS"
-                        for (attempt in 0 until 180) {
-                            val run = withContext(Dispatchers.IO) { api.getRun(id) }
-                            val state = run.optString("status")
-                            conclusion = run.optString("conclusion")
-                            details = "GitHub Actions: $state" + if (conclusion.isNotBlank() && conclusion != "null") " • $conclusion" else ""
-                            if (state == "completed") { completed = true; break }
-                            delay(5000)
-                        }
-                        if (!completed) throw IllegalStateException("Build is taking too long. Run ID $id can be checked later in GitHub Actions.")
-                        if (conclusion != "success") throw IllegalStateException("Build failed ($conclusion). Open Build Logs / GitHub Actions for details.")
-                        status = "DOWNLOADING ARTIFACT"; details = "Build successful. Downloading APK artifact..."
-                        val apk = withContext(Dispatchers.IO) { api.downloadApkArtifact(id) }
-                        val name = "GI-Build-${id}.apk"
-                        val out = withContext(Dispatchers.IO) {
-                            val f = java.io.File(context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS), name)
-                            f.parentFile?.mkdirs(); f.writeBytes(apk); f
-                        }
-                        status = "BUILD SUCCESSFUL"; details = "APK saved: ${out.absolutePath}"
-                    } catch (e: Exception) {
-                        status = "BUILD FAILED"; details = e.message ?: "Unexpected error"
+                        Spacer(Modifier.height(18.dp))
+                        Text("G.I SYSTEMS • GOLDEN CYBER / NEON", color = MUTED, fontSize = 10.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
                     }
-                    busy = false
-                }
-            }
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        if (runId == null) { details = "No run ID yet. Start a build first."; return@launch }
-                        busy = true
-                        try {
-                            val api = GitHubApi(owner, repo, token)
-                            details = withContext(Dispatchers.IO) { api.getRun(runId!!).toString(2) }
-                        } catch (e: Exception) { details = e.message ?: "Could not fetch run" }
-                        busy = false
-                    }
-                }, enabled = !busy, modifier = Modifier.fillMaxWidth()
-            ) { Text("REFRESH RUN DETAILS", color = Green) }
-        }
-
-        SectionCard("SECURITY NOTE", Icons.Default.Shield) {
-            Text("Use a narrowly scoped fine-grained token. This app stores it locally, but a rooted or compromised device can expose secrets. Never share your token or a configured APK. Do not run ZIP projects from unknown sources.", color = Muted, fontSize = 12.sp)
-        }
-        Text("G.I SYSTEMS  •  CYBER GOLD / NEON GREEN", color = Color(0xFF53635A), fontSize = 10.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
-    }
-}
-
-@Composable
-private fun StatChip(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
-    Surface(modifier, color = Panel, shape = RoundedCornerShape(12.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF26372D))) {
-        Column(Modifier.padding(12.dp)) {
-            Text(label, color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            Text(value.take(20), color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        }
-    }
-}
-
-@Composable
-private fun SectionCard(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector, content: @Composable ColumnScope.() -> Unit) {
-    Surface(color = Panel, shape = RoundedCornerShape(18.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF26372D))) {
-        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = Green, modifier = Modifier.size(19.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(title, color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            }
-            content()
-        }
-    }
-}
-
-@Composable
-private fun OutlinedField(label: String, value: String, onValueChange: (String) -> Unit, secret: Boolean = false, singleLine: Boolean = false) {
-    OutlinedTextField(
-        value = value, onValueChange = onValueChange, label = { Text(label) },
-        modifier = Modifier.fillMaxWidth(), singleLine = singleLine,
-        visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Green, unfocusedBorderColor = Color(0xFF3A4B40),
-            focusedLabelColor = Gold, unfocusedLabelColor = Muted, cursorColor = Green
-        )
-    )
-}
-
-@Composable
-private fun GoldButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Bg), shape = RoundedCornerShape(12.dp)) {
-        Text(text, fontWeight = FontWeight.Black, fontSize = 12.sp)
-    }
-}
-
-@Composable
-private fun GreenButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Green, contentColor = Bg), shape = RoundedCornerShape(12.dp)) {
-        Text(text, fontWeight = FontWeight.Black, fontSize = 12.sp)
-    }
-}
-
-private class GitHubApi(private val owner: String, private val repo: String, private val token: String) {
-    private val base = "https://api.github.com/repos/${owner.trim()}/${repo.trim()}"
-    private fun request(path: String, method: String = "GET", body: JSONObject? = null, accept: String = "application/vnd.github+json"): Pair<Int, ByteArray> {
-        val conn = URL(base + path).openConnection() as HttpURLConnection
-        conn.requestMethod = method
-        conn.connectTimeout = 20000
-        conn.readTimeout = 60000
-        conn.setRequestProperty("Authorization", "Bearer ${token.trim()}")
-        conn.setRequestProperty("Accept", accept)
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        conn.setRequestProperty("User-Agent", "GI-APK-Builder-Android")
-        if (body != null) {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-        }
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
-        conn.disconnect()
-        if (code !in 200..299) throw IllegalStateException("GitHub API HTTP $code: ${bytes.toString(Charsets.UTF_8).take(800)}")
-        return code to bytes
-    }
-
-    fun testConnection(): String {
-        val (_, bytes) = request("")
-        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
-        return "Connected to ${obj.optString("full_name")} • default branch ${obj.optString("default_branch")}"
-    }
-
-    fun uploadZip(bytes: ByteArray, branch: String) {
-        val body = JSONObject()
-            .put("message", "G.I APK Builder: upload project source")
-            .put("branch", branch.ifBlank { "main" })
-            .put("content", Base64.getEncoder().encodeToString(bytes))
-        // GitHub Contents API has a 100 MB hard limit; practical client cap is lower.
-        request("/contents/incoming/project.zip", "PUT", body)
-    }
-
-    fun dispatch(branch: String) {
-        val body = JSONObject().put("ref", branch.ifBlank { "main" })
-        request("/actions/workflows/android-build.yml/dispatches", "POST", body)
-    }
-
-    fun findLatestRun(): Long? {
-        val (_, bytes) = request("/actions/workflows/android-build.yml/runs?per_page=5")
-        val runs = JSONObject(bytes.toString(Charsets.UTF_8)).optJSONArray("workflow_runs") ?: return null
-        for (i in 0 until runs.length()) {
-            val obj = runs.getJSONObject(i)
-            if (obj.optString("event") == "workflow_dispatch") return obj.optLong("id").takeIf { it > 0 }
-        }
-        return null
-    }
-
-    fun getRun(id: Long): JSONObject {
-        val (_, bytes) = request("/actions/runs/$id")
-        return JSONObject(bytes.toString(Charsets.UTF_8))
-    }
-
-    fun downloadApkArtifact(runId: Long): ByteArray {
-        val (_, bytes) = request("/actions/runs/$runId/artifacts")
-        val artifacts = JSONObject(bytes.toString(Charsets.UTF_8)).optJSONArray("artifacts")
-            ?: throw IllegalStateException("No artifacts returned")
-        var artifactId = -1L
-        for (i in 0 until artifacts.length()) {
-            val a = artifacts.getJSONObject(i)
-            if (a.optString("name") == "gi-apk") { artifactId = a.optLong("id"); break }
-        }
-        if (artifactId < 0) throw IllegalStateException("Artifact 'gi-apk' not found. Check workflow output.")
-        val conn = URL("$base/actions/artifacts/$artifactId/zip").openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 20000; conn.readTimeout = 120000
-        conn.setRequestProperty("Authorization", "Bearer ${token.trim()}")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            val err = conn.errorStream?.use { it.readBytes() }?.toString(Charsets.UTF_8) ?: ""
-            throw IllegalStateException("Artifact download HTTP $code: ${err.take(500)}")
-        }
-        val zip = conn.inputStream.use { it.readBytes() }
-        conn.disconnect()
-        val zis = ZipInputStream(zip.inputStream())
-        zis.use { z ->
-            while (true) {
-                val entry = z.nextEntry ?: break
-                if (!entry.isDirectory && entry.name.endsWith(".apk", true)) {
-                    val out = ByteArrayOutputStream()
-                    z.copyTo(out)
-                    return out.toByteArray()
                 }
             }
         }
-        throw IllegalStateException("Artifact ZIP contains no APK")
+    }
+}
+
+@Composable
+private fun CyberBackground() {
+    val trans = rememberInfiniteTransition(label = "cyber")
+    val drift by trans.animateFloat(0f, 38f, infiniteRepeatable(tween(7500, easing = LinearEasing), RepeatMode.Reverse), label = "drift")
+    Canvas(Modifier.fillMaxSize()) {
+        drawRect(Brush.verticalGradient(listOf(Color(0xFF071421), Color(0xFF03070C), Color(0xFF0A111A))))
+        val step = 30.dp.toPx()
+        var x = 0f
+        while (x < size.width) { drawLine(CYAN.copy(alpha = .05f), Offset(x + drift * .1f, 0f), Offset(x + drift * .1f, size.height), 1f); x += step }
+        var y = 0f
+        while (y < size.height) { drawLine(GOLD.copy(alpha = .035f), Offset(0f, y + drift * .1f), Offset(size.width, y + drift * .1f), 1f); y += step }
+        repeat(28) { i ->
+            val px = (i * 83f + drift).mod(size.width.coerceAtLeast(1f))
+            val py = (i * 139f + drift * 1.7f).mod(size.height.coerceAtLeast(1f))
+            drawCircle(if (i % 3 == 0) GOLD.copy(alpha = .25f) else CYAN.copy(alpha = .18f), if (i % 4 == 0) 2.1f else 1.1f, Offset(px, py))
+        }
+    }
+}
+@Composable
+private fun NeonCard(glow: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
+    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = PANEL,
+        border = BorderStroke(1.dp, if (glow) Brush.horizontalGradient(listOf(CYAN.copy(alpha = .7f), GOLD.copy(alpha = .45f), CYAN.copy(alpha = .2f))) else Brush.horizontalGradient(listOf(MUTED, MUTED))) ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp), content = content)
+    }
+}
+@Composable
+private fun StatCard(label: String, value: String, tint: Color, modifier: Modifier, glow: Boolean) {
+    Box(modifier) { NeonCard(glow) { Text(label, color = MUTED, fontSize = 10.sp, fontWeight = FontWeight.Bold); Text(value, color = tint, fontSize = 17.sp, fontWeight = FontWeight.Black) } }
+}
+@Composable
+private fun ToggleRow(label: String, checked: Boolean, change: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), color = Color.White, fontSize = 13.sp)
+        Switch(checked, change)
     }
 }

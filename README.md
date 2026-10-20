@@ -1,36 +1,15 @@
-# G.I APK Builder — Golden Edition
+# G.I APK Builder — Golden Cyber Edition
 
-Android app starter for importing an Android project ZIP, uploading it to a GitHub repository, dispatching a GitHub Actions workflow, polling the run status, and downloading the APK artifact back to the phone.
+Fresh Android source project. Includes a cyber-themed Compose UI, GitHub repository/branch/token settings, workflow dispatch, workflow run polling, local build history, selectable console, copy console, project ZIP picker, appearance/build/security preferences, diagnostics, and GitHub Actions APK artifact link.
 
-## UI
-Cyber Gold + Neon Green + Dark, Kotlin + Jetpack Compose.
+## Build
+Open in Android Studio with JDK 17 and Android SDK 35, or push to GitHub and use `.github/workflows/android-build.yml`.
 
-## Important limitations
-- This is a functional starter project, not a published/production-tested app.
-- The GitHub repository must contain `.github/workflows/android-build.yml` from this package on its default branch before the app can dispatch builds.
-- The app uploads the selected ZIP as `incoming/project.zip` to the configured repository. Each build replaces that file, so do not run concurrent builds in the same repository.
-- Imported projects must be valid Gradle Android projects and should produce `app/build/outputs/apk/**`.
-- GitHub Actions usage limits apply. Private repository access and Actions permissions must be enabled.
-- A Personal Access Token is stored locally using Android EncryptedSharedPreferences. No client-side storage is perfectly safe on a compromised/rooted device. Prefer a narrowly scoped fine-grained token and never share the APK with the token inside it.
-- Signing is configured in the workflow using GitHub Secrets. Without secrets, the workflow builds a debug APK and returns it as an artifact.
-- For production, consider a backend or GitHub App flow instead of a personal token in the Android client.
+## Configure
+Settings → GitHub Connection:
+- Repository: `owner/repository`
+- Branch: `main`
+- GitHub Personal Access Token with repository Contents and Actions permissions.
 
-## GitHub repository setup
-1. Create a private repository, e.g. `GI-APK-Builder-Engine`.
-2. Copy `.github/workflows/android-build.yml` from this package into that repository and commit it to the default branch.
-3. In Settings → Actions → General, allow workflows and grant the repository the needed default permissions. The workflow declares `contents: read` and `actions: write` only where needed.
-4. Create a fine-grained PAT with access to this repository. Minimum permissions commonly needed: Contents (read/write), Actions (read/write), Metadata (read). GitHub may require workflow permission when changing workflow files; this app does not modify workflow files.
-5. In the app, enter owner, repository name, and token, then test the connection.
-6. Import a ZIP containing a Gradle Android project and tap Build APK.
-
-## Optional release signing
-Add these repository Actions secrets:
-- `ANDROID_KEYSTORE_BASE64`: base64-encoded JKS/PKCS12 keystore
-- `ANDROID_KEYSTORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
-
-If all four are configured, the workflow signs a release APK using `apksigner`. Otherwise it builds and returns a debug APK. Never commit keystore files or passwords.
-
-## Build the G.I APK Builder app
-Open this folder in Android Studio and build the `app` module. Android Studio will generate/use a compatible Gradle wrapper. Minimum SDK 26, target SDK 35.
+## Honest feature notes
+The app triggers a workflow in the configured repository and polls run status. Project ZIP selection is included, but automatic uploading of arbitrary ZIP contents to GitHub is not implemented. Artifact access opens the GitHub artifact download URL; GitHub may require sign-in. The UI's auto-download option is currently a preference, not a background download engine. Logo/icon assets are intentionally omitted so you can add your own later.

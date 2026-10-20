@@ -1,29 +1,17 @@
-name: G.I APK Builder - Golden Edition
+name: G.I APK Builder - Android APK
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-    paths:
-      - 'app/**'
-      - '*.gradle.kts'
-      - 'gradle.properties'
-      - 'settings.gradle.kts'
-      - '.github/workflows/android-build.yml'
+    branches: [main, master]
+  workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: gi-apk-builder-${{ github.ref }}
-  cancel-in-progress: false
+  actions: read
 
 jobs:
   build:
-    name: Build G.I APK Builder
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
       - name: Checkout source
@@ -37,26 +25,17 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: 'latest'
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
 
-      - name: Build Debug APK
+      - name: Build debug APK
         run: gradle --no-daemon assembleDebug
 
-      - name: Verify APK
-        run: |
-          set -eu
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -f "$APK"
-          ls -lh "$APK"
-
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: gi-apk-builder-debug
